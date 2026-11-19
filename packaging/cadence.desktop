@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Cadence
+Comment=Marching band drill design
+Exec=cadence
+Icon=cadence-icon
+Terminal=false
+Categories=Graphics;Education;

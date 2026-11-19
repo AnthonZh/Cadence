@@ -1,0 +1,454 @@
+use crate::{
+    field,
+    model::{Performer, Point, Show},
+};
+use std::{fmt::Write as _, fs, path::Path};
+
+const PAGE_W: f32 = 612.0;
+const PAGE_H: f32 = 792.0;
+const FIELD_X: f32 = 36.0;
+const FIELD_Y: f32 = 390.0;
+const FIELD_W: f32 = 540.0;
+const FIELD_H: f32 = FIELD_W * field::WIDTH_STEPS / field::LENGTH_STEPS;
+
+struct Keyframe {
+    title: String,
+    count: f32,
+    counts_from_previous: f32,
+}
+
+pub fn export_performer_packets(show: &Show, directory: &Path) -> Result<usize, String> {
+    fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+    let keyframes = keyframes(show);
+    for performer in &show.performers {
+        let pages: Vec<String> = keyframes
+            .iter()
+            .enumerate()
+            .map(|(index, keyframe)| page_content(show, performer, &keyframes, index, keyframe))
+            .collect();
+        let file_name = format!("{}-drill-book.pdf", safe_name(&performer.label));
+        write_pdf(&directory.join(file_name), &pages)?;
+    }
+    Ok(show.performers.len())
+}
+
+fn keyframes(show: &Show) -> Vec<Keyframe> {
+    let mut frames = Vec::new();
+    let mut previous = 0.0;
+    for (set_index, set) in show.sets.iter().enumerate() {
+        let start = show.set_start(set_index);
+        frames.push(Keyframe {
+            title: set.name.clone(),
+            count: start,
+            counts_from_previous: start - previous,
+        });
+        previous = start;
+        let mut subsets: Vec<_> = set.subsets.iter().collect();
+        subsets.sort_by(|a, b| a.offset_count.total_cmp(&b.offset_count));
+        for subset in subsets {
+            let count = start + subset.offset_count;
+            frames.push(Keyframe {
+                title: format!("{} / {}", set.name, subset.name),
+                count,
+                counts_from_previous: count - previous,
+            });
+            previous = count;
+        }
+    }
+    frames.sort_by(|a, b| a.count.total_cmp(&b.count));
+    for index in 1..frames.len() {
+        frames[index].counts_from_previous = frames[index].count - frames[index - 1].count;
+    }
+    frames
+}
+
+fn page_content(
+    show: &Show,
+    performer: &Performer,
+    keyframes: &[Keyframe],
+    index: usize,
+    keyframe: &Keyframe,
+) -> String {
+    let mut output = String::new();
+    text(&mut output, 36.0, 760.0, 18.0, &show.name);
+    text(
+        &mut output,
+        36.0,
+        738.0,
+        14.0,
+        &format!("{}  /  {}", performer.label, performer.section),
+    );
+    text(&mut output, 360.0, 760.0, 15.0, &keyframe.title);
+    text(
+        &mut output,
+        360.0,
+        738.0,
+        10.0,
+        &format!(
+            "Count {:.2}   +{:.2}   {:.2} BPM   {:02}:{:05.2}",
+            keyframe.count,
+            keyframe.counts_from_previous,
+            show.music.bpm,
+            ((show.music.offset_seconds + keyframe.count * 60.0 / show.music.bpm) / 60.0).floor()
+                as u32,
+            (show.music.offset_seconds + keyframe.count * 60.0 / show.music.bpm) % 60.0
+        ),
+    );
+
+    let previous = index
+        .checked_sub(1)
+        .and_then(|previous| show.position_at(performer.id, keyframes[previous].count));
+    draw_field(&mut output, show, performer.id, keyframe.count, previous);
+    let position = show.position_at(performer.id, keyframe.count);
+    if let Some(position) = position {
+        text(&mut output, 36.0, 350.0, 13.0, "COORDINATE");
+        text(
+            &mut output,
+            36.0,
+            330.0,
+            11.0,
+            &coordinate_description(position),
+        );
+        text(
+            &mut output,
+            36.0,
+            312.0,
+            10.0,
+            &format!(
+                "X {:.2} yd   Y {:.2} yd",
+                field::steps_to_yards(position.x),
+                field::steps_to_yards(position.y)
+            ),
+        );
+        if let Some(previous) = previous {
+            let distance = previous.distance(position);
+            let step_size = if keyframe.counts_from_previous > 0.0 {
+                distance / keyframe.counts_from_previous
+            } else {
+                0.0
+            };
+            text(
+                &mut output,
+                36.0,
+                294.0,
+                10.0,
+                &format!(
+                    "Move {:.2} steps in {:.2} counts   Step size {:.3} steps/count",
+                    distance, keyframe.counts_from_previous, step_size
+                ),
+            );
+        }
+    }
+    text(&mut output, 36.0, 258.0, 11.0, "PATH / REHEARSAL NOTES");
+    for row in 0..8 {
+        let y = 242.0 - row as f32 * 24.0;
+        line(&mut output, 36.0, y, 576.0, y, 0.4, (0.72, 0.72, 0.72));
+    }
+    text(
+        &mut output,
+        36.0,
+        28.0,
+        8.0,
+        &format!(
+            "Personal drill packet  |  Page {} of {}  |  Generated by Cadence",
+            index + 1,
+            keyframes.len()
+        ),
+    );
+    output
+}
+
+fn draw_field(
+    output: &mut String,
+    show: &Show,
+    selected_id: u32,
+    count: f32,
+    previous: Option<Point>,
+) {
+    let _ = writeln!(
+        output,
+        "1 1 1 rg {FIELD_X} {FIELD_Y} {FIELD_W} {FIELD_H} re f"
+    );
+    for step in (0..=160).step_by(2) {
+        let x = FIELD_X + step as f32 / field::LENGTH_STEPS * FIELD_W;
+        let major = step % 8 == 0;
+        line(
+            output,
+            x,
+            FIELD_Y,
+            x,
+            FIELD_Y + FIELD_H,
+            if major { 0.8 } else { 0.25 },
+            if major {
+                (0.62, 0.62, 0.62)
+            } else {
+                (0.81, 0.93, 0.96)
+            },
+        );
+    }
+    for step in (0..=85).step_by(2) {
+        let y = FIELD_Y + step as f32 / field::WIDTH_STEPS * FIELD_H;
+        line(
+            output,
+            FIELD_X,
+            y,
+            FIELD_X + FIELD_W,
+            y,
+            if step % 8 == 0 { 0.6 } else { 0.25 },
+            if step % 8 == 0 {
+                (0.62, 0.62, 0.62)
+            } else {
+                (0.81, 0.93, 0.96)
+            },
+        );
+    }
+    let _ = writeln!(
+        output,
+        "0.35 0.35 0.35 RG 1 w {FIELD_X} {FIELD_Y} {FIELD_W} {FIELD_H} re S"
+    );
+    for yard in 1..20 {
+        let number = if yard <= 10 {
+            yard * 5
+        } else {
+            (20 - yard) * 5
+        };
+        let x = FIELD_X + yard as f32 / 20.0 * FIELD_W - 5.0;
+        text(output, x, FIELD_Y + 10.0, 8.0, &number.to_string());
+        text(
+            output,
+            x,
+            FIELD_Y + FIELD_H - 16.0,
+            8.0,
+            &number.to_string(),
+        );
+    }
+    if let (Some(previous), Some(current)) = (previous, show.position_at(selected_id, count)) {
+        line(
+            output,
+            FIELD_X + previous.x / field::LENGTH_STEPS * FIELD_W,
+            FIELD_Y + FIELD_H - previous.y / field::WIDTH_STEPS * FIELD_H,
+            FIELD_X + current.x / field::LENGTH_STEPS * FIELD_W,
+            FIELD_Y + FIELD_H - current.y / field::WIDTH_STEPS * FIELD_H,
+            1.2,
+            (0.93, 0.62, 0.12),
+        );
+    }
+    for performer in &show.performers {
+        if let Some(point) = show.position_at(performer.id, count) {
+            let x = FIELD_X + point.x / field::LENGTH_STEPS * FIELD_W;
+            let y = FIELD_Y + FIELD_H - point.y / field::WIDTH_STEPS * FIELD_H;
+            if performer.id == selected_id {
+                circle(output, x, y, 4.5, (0.50, 0.15, 0.16));
+                text(output, x + 6.0, y + 4.0, 9.0, &performer.label);
+            } else {
+                circle(output, x, y, 1.5, (0.12, 0.20, 0.24));
+            }
+        }
+    }
+}
+
+fn coordinate_description(point: Point) -> String {
+    let x_reference = field::nearest_yard_line(point.x);
+    let x_offset = point.x - field::yards_to_steps(x_reference);
+    let side_one = x_reference <= 50.0;
+    let yard_line = if side_one {
+        x_reference
+    } else {
+        100.0 - x_reference
+    };
+    let horizontal = if x_offset.abs() < 0.05 {
+        format!("on {yard_line:.0} yd line")
+    } else {
+        let inside = if side_one {
+            x_offset > 0.0
+        } else {
+            x_offset < 0.0
+        };
+        format!(
+            "{:.2} steps {} the {yard_line:.0} yd line",
+            x_offset.abs(),
+            if inside { "inside" } else { "outside" }
+        )
+    };
+    let y_reference = field::nearest_vertical_reference(point.y);
+    let y_offset = point.y - field::yards_to_steps(y_reference.yards());
+    let vertical = if y_offset.abs() < 0.05 {
+        format!("on {}", y_reference.label().to_ascii_lowercase())
+    } else {
+        format!(
+            "{:.2} steps {} {}",
+            y_offset.abs(),
+            if y_offset > 0.0 {
+                "behind"
+            } else {
+                "in front of"
+            },
+            y_reference.label().to_ascii_lowercase()
+        )
+    };
+    format!(
+        "Side {}  |  {}  |  {}",
+        if side_one { 1 } else { 2 },
+        horizontal,
+        vertical
+    )
+}
+
+fn text(output: &mut String, x: f32, y: f32, size: f32, value: &str) {
+    let _ = writeln!(
+        output,
+        "0.12 0.12 0.12 rg BT /F1 {size} Tf {x} {y} Td ({}) Tj ET",
+        escape_pdf(value)
+    );
+}
+
+fn line(
+    output: &mut String,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+    width: f32,
+    color: (f32, f32, f32),
+) {
+    let _ = writeln!(
+        output,
+        "{} {} {} RG {width} w {x1} {y1} m {x2} {y2} l S",
+        color.0, color.1, color.2
+    );
+}
+
+fn circle(output: &mut String, x: f32, y: f32, radius: f32, color: (f32, f32, f32)) {
+    let control = radius * 0.552_284_8;
+    let _ = writeln!(
+        output,
+        "{} {} {} rg {} {} m {} {} {} {} {} {} c {} {} {} {} {} {} c {} {} {} {} {} {} c {} {} {} {} {} {} c f",
+        color.0,
+        color.1,
+        color.2,
+        x + radius,
+        y,
+        x + radius,
+        y + control,
+        x + control,
+        y + radius,
+        x,
+        y + radius,
+        x - control,
+        y + radius,
+        x - radius,
+        y + control,
+        x - radius,
+        y,
+        x - radius,
+        y - control,
+        x - control,
+        y - radius,
+        x,
+        y - radius,
+        x + control,
+        y - radius,
+        x + radius,
+        y - control,
+        x + radius,
+        y
+    );
+}
+
+fn write_pdf(path: &Path, pages: &[String]) -> Result<(), String> {
+    let mut objects = Vec::new();
+    objects.push("<< /Type /Catalog /Pages 2 0 R >>".as_bytes().to_vec());
+    let page_ids: Vec<usize> = (0..pages.len()).map(|index| 4 + index * 2).collect();
+    let kids = page_ids
+        .iter()
+        .map(|id| format!("{id} 0 R"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    objects.push(format!("<< /Type /Pages /Count {} /Kids [{kids}] >>", pages.len()).into_bytes());
+    objects.push(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec());
+    for (index, page) in pages.iter().enumerate() {
+        let page_id = 4 + index * 2;
+        let content_id = page_id + 1;
+        objects.push(
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {PAGE_W} {PAGE_H}] /Resources << /Font << /F1 3 0 R >> >> /Contents {content_id} 0 R >>"
+            )
+            .into_bytes(),
+        );
+        objects.push(
+            format!("<< /Length {} >>\nstream\n{}\nendstream", page.len(), page).into_bytes(),
+        );
+    }
+    let mut pdf = b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n".to_vec();
+    let mut offsets = vec![0];
+    for (index, object) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+        pdf.extend_from_slice(object);
+        pdf.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = pdf.len();
+    pdf.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+    pdf.extend_from_slice(b"0000000000 65535 f \n");
+    for offset in offsets.into_iter().skip(1) {
+        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    fs::write(path, pdf).map_err(|error| error.to_string())
+}
+
+fn escape_pdf(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('(', "\\(")
+        .replace(')', "\\)")
+        .replace(|character: char| !character.is_ascii(), "?")
+}
+
+fn safe_name(value: &str) -> String {
+    let name: String = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if name.is_empty() {
+        "performer".into()
+    } else {
+        name
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exports_a_multipage_packet_for_each_performer() {
+        let mut show = Show::default();
+        let performer = show.add_performer(Point { x: 40.0, y: 30.0 });
+        show.add_set(0);
+        show.sets[1]
+            .positions
+            .insert(performer, Point { x: 48.0, y: 30.0 });
+        let directory =
+            std::env::temp_dir().join(format!("cadence-packets-{}", std::process::id()));
+        export_performer_packets(&show, &directory).unwrap();
+        let path = directory.join("P1-drill-book.pdf");
+        let bytes = fs::read(&path).unwrap();
+        fs::remove_dir_all(directory).unwrap();
+
+        assert!(bytes.starts_with(b"%PDF-1.4"));
+        assert!(String::from_utf8_lossy(&bytes).contains("/Count 2"));
+    }
+}

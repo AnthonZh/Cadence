@@ -1,0 +1,14 @@
+/target
+*.drill.json
+shortcuts.json
+/dist/
+/recent-projects.json
+*.mdrill
+/performer-drill-packets/
+/set-*.png
+__pycache__/
+.DS_Store
+Thumbs.db
+/.agents/
+/.codex/
+/.aws/

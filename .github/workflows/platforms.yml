@@ -1,0 +1,111 @@
+name: Build and release
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  CARGO_TERM_COLOR: always
+  MACOSX_DEPLOYMENT_TARGET: '11.0'
+
+jobs:
+  format:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  build:
+    needs: format
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          targets: ${{ matrix.target }}
+          components: clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libxkbcommon-x11-dev libwayland-dev libx11-dev libxi-dev libxcursor-dev libxrandr-dev libgl1-mesa-dev fonts-dejavu-core
+      - name: Validate release version
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python -c "import os,tomllib; v=tomllib.load(open('Cargo.toml','rb'))['package']['version']; assert os.environ['RELEASE_TAG']=='v'+v, 'Tag must match Cargo.toml version'"
+      - name: Test package layouts
+        run: python -m unittest discover -s scripts -p 'test_*.py'
+      - run: cargo clippy --locked --all-targets --target ${{ matrix.target }} -- -D warnings
+      - run: cargo test --locked --target ${{ matrix.target }}
+      - run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Package binary and dependency notices
+        run: python scripts/package.py --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cadence-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cadence-*
+          path: dist
+          merge-multiple: true
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum --check *.sha256
+          options=()
+          if [[ "$RELEASE_TAG" == *-* ]]; then options+=(--prerelease); fi
+          gh release create "$RELEASE_TAG" ./*.zip ./*.tar.gz ./*.sha256 \
+            --verify-tag --draft --title "Cadence $RELEASE_TAG" \
+            --notes-file ../CHANGELOG.md "${options[@]}"

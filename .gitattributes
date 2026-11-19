@@ -1,0 +1,13 @@
+* text=auto
+*.rs text eol=lf
+*.py text eol=lf
+*.toml text eol=lf
+*.lock text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
+*.svg text eol=lf
+*.desktop text eol=lf
+*.png -text
+*.pdf -text
+*.zip -text
+*.gz -text

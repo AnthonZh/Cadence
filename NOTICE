@@ -1,0 +1,10 @@
+Cadence
+Copyright 2026 Cadence contributors
+
+Licensed under the Apache License, Version 2.0.
+
+Third-party dependencies retain their respective copyrights and licenses.
+Release archives include third-party license notices generated from Cargo metadata.
+
+Cadence is an independent project. Pyware and Altium Designer are
+trademarks of their respective owners; no affiliation or endorsement is implied.

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" aria-label="Cadence">
+  <rect x="4" y="4" width="248" height="248" fill="#ffffff" stroke="#7f2529" stroke-width="8"/>
+  <g stroke="#9cd3e1" stroke-width="2">
+    <path d="M36 20v216M68 20v216M100 20v216M132 20v216M164 20v216M196 20v216M228 20v216"/>
+    <path d="M20 36h216M20 68h216M20 100h216M20 132h216M20 164h216M20 196h216M20 228h216"/>
+  </g>
+  <path d="M192 72H72v112h120" fill="none" stroke="#7f2529" stroke-width="20" stroke-linejoin="miter"/>
+  <rect x="176" y="112" width="32" height="32" fill="#ed9d1e"/>
+</svg>
